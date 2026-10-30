@@ -1,0 +1,90 @@
+name: Claude Docs Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+
+env:
+  CLAUDE_OPUS_MODEL: claude-opus-5-5
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  docs-review:
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref != 'ci/update-hl-deps'
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@claude review') &&
+        (
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Get PR SHA
+        id: pr-sha
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'issue_comment') {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number
+              });
+              core.setOutput('head_sha', pr.head.sha);
+              core.setOutput('head_repo', pr.head.repo.full_name);
+              core.setOutput('is_fork', String(pr.head.repo.fork));
+            } else {
+              core.setOutput('head_sha', context.payload.pull_request.head.sha);
+            }
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.pr-sha.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: POC verify PR-head content is present in the runner
+        run: |
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "pr_head_repo=${{ steps.pr-sha.outputs.head_repo }} is_fork=${{ steps.pr-sha.outputs.is_fork }}"
+          echo "checked_out_head=$(git rev-parse HEAD)"
+          echo "--- marker file from the PR head ---"
+          cat poc-marker.md || echo "no marker"
+          echo "--- .agents/skills/code-review/SKILL.md from the PR head ---"
+          cat .agents/skills/code-review/SKILL.md || echo "no skill file"
+          echo "--- .claude/settings.json from the PR head ---"
+          cat .claude/settings.json || echo "no settings"
+
+      - name: Run Claude Docs Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: "sk-ant-poc-dummy-key-not-valid"
+          prompt: "Use agent teams to run /code-review, then use /inline-pr-comments to post findings as a consolidated PR review with inline comments"
+          track_progress: true
+          use_sticky_comment: false
+          claude_args: |
+            --model ${{ env.CLAUDE_OPUS_MODEL }}
+            --allowedTools "Bash(gh api:*)"
